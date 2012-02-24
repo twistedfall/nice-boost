@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# configuration options
+BOOST_NICENESS=-4
+INTERVAL=1.5 # in seconds (argument to sleep)
+# end of configuration options
+
+clean_up()
+{
+	rm -f "$gui_pids_file" "$active_cpids_file"
+	exit
+}
+
+trap clean_up SIGHUP SIGINT SIGTERM
+
+shopt -s extglob
+
+last_active_wnd=
+
+while true;
+do
+	# retreive currently focused window
+	active_wnd=$(xprop -display "$DISPLAY" -notype -root _NET_ACTIVE_WINDOW 2> /dev/null) # _NET_ACTIVE_WINDOW: window id # 0x300004f
+	if [[ "$?" != "0" ]];
+	then
+		echo -n "Unable to connect to display \"$DISPLAY\", trying to locate .Xauthority file..." >&2
+		# find current user id from supplied $DISPLAY using consolekit
+		user_id=$(ck-list-sessions | grep -B10 "x11-display = '$DISPLAY'" | grep 'unix-user ='| tail -n1 | grep -o '[[:digit:]]\+')
+		# setup $XAUTHORITY env variable to be able to connect to user X
+		XAUTHORITY="$(getent passwd "$user_id" | cut -d: -f6)/.Xauthority"
+		if [ -r "$XAUTHORITY" ];
+		then
+			echo " Success" >&2
+			export XAUTHORITY
+			# try to receive currently fucused window once again
+			active_wnd=$(xprop -display "$DISPLAY" -notype -root _NET_ACTIVE_WINDOW 2> /dev/null)
+		else
+			echo " Failed, \"$XAUTHORITY\" doesn't exist" >&2
+			false
+		fi
+	fi
+	if [[ "$?" == "0" ]];
+	then
+		active_wnd=${active_wnd#*# } # strip everything before and together with #
+		if [[ "$active_wnd" != "$last_active_wnd" ]];
+		then
+			last_active_wnd="$active_wnd"
+			# retreive active process owning this window
+			active_pid=$(xprop -display "$DISPLAY" -notype -id "$active_wnd" _NET_WM_PID 2> /dev/null) # _NET_WM_PID = 100
+			active_pid=${active_pid##_NET_WM_PID?(*= )} # if window has no such property then xprop just returns atom name
+			if [[ "$active_pid" != "" ]];
+			then
+				# store all current GUI processes (with environment containing DISPLAY==$DISPLAY) into temp file
+				gui_pids=$(grep -l DISPLAY="$DISPLAY" /proc/*/environ 2> /dev/null | grep -o '[[:digit:]]\+' | sort)
+				if [[ "$1" == "restore" ]]; # if "restore" cli argument supplied
+				then
+					# fetch all process and thread ids of GUI processes that have boosted niceness
+					restore_tids=$(ps -L --no-headers -o ni,tid -p $gui_pids | awk "/^ *$BOOST_NICENESS/ {print \$2}")
+					# restore their priority to zero
+					renice 0 --pid $restore_tids &> /dev/null
+					exit
+				fi
+				gui_pids_file=$(mktemp)
+				echo "$gui_pids" > "$gui_pids_file"
+				# store active process full child tree pids (without tids) into temp file
+				active_cpids_file=$(mktemp)
+				pstree -p "$active_pid" | grep -oP '(?<=[^}]\()\d+(?=\))' | sort > "$active_cpids_file"
+				# fetch only those GUI pids that don't belong to active process tree (difference)
+				restore_pids=$(comm -23 "$gui_pids_file" "$active_cpids_file")
+				# fetch only GUI pids of active process tree (intersection)
+				active_cpids=$(comm -12 "$gui_pids_file" "$active_cpids_file")
+				# clean up
+				rm -f "$gui_pids_file" "$active_cpids_file"
+				# fetch all process and thread ids of GUI processes (except the active process tree) that have boosted niceness
+				restore_tids=$(ps -L --no-headers -o ni,tid -p $restore_pids | awk "/^ *$BOOST_NICENESS/ {print \$2}")
+				# restore their priority to zero
+				renice 0 --pid $restore_tids &> /dev/null
+				# fetch all process and thread ids of active process tree that have default 0 niceness
+				active_tids=$(ps -L --no-headers -o ni,tid -p $active_cpids | awk "/^ *0 / {print \$2}")
+				if [[ "$active_tids" != "" ]];
+				then
+					# boost their niceness (with fancy message) in case such pids or tids exist
+					echo "Boosting $(basename $(readlink /proc/$active_pid/exe)) ($active_pid)"
+					renice "$BOOST_NICENESS" --pid $active_tids > /dev/null
+				fi
+			fi
+		fi
+	fi
+	if [[ "$1" == "restore" ]]; # if "restore" cli argument supplied
+	then
+		# don't keep trying to connect to display
+		exit
+	fi
+	sleep "$INTERVAL"
+done

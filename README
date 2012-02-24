@@ -1,0 +1,5 @@
+Utility to automatically give priority boost to foreground (focused) X application
+
+Requrements
+===========
+bash, ConsoleKit, xprop, grep, awk, ps, pstree, util-linux: renice, coreutils: comm, tail

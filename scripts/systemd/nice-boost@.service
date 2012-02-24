@@ -1,0 +1,11 @@
+[Unit]
+Description=Automatically give priority boost to foreground (focused) X application
+After=graphical.target
+
+[Service]
+Environment=DISPLAY=%I
+ExecStart=/usr/local/sbin/nice-boost
+ExecStopPost=/usr/local/sbin/nice-boost restore
+
+[Install]
+Alias=graphical.target.wants/nice-boost@:0.service
